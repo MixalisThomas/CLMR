@@ -6,6 +6,8 @@ from torch import Tensor
 from simclr import SimCLR
 from simclr.modules import NT_Xent, LARS
 
+from clmr.modules.sgap import SGAPContrastive
+
 
 class ContrastiveLearning(LightningModule):
     def __init__(self, args, encoder: nn.Module):
@@ -39,7 +41,21 @@ class ContrastiveLearning(LightningModule):
         else:
             batch_size = self.hparams.batch_size
 
-        criterion = NT_Xent(batch_size, self.hparams.temperature, world_size=1)
+        # --batch_size is interpreted as PER-DEVICE under DDP, so with multiple
+        # GPUs the true contrastive batch is only reconstructed by gathering
+        # embeddings across all of them (see GatherLayer usage in NT_Xent /
+        # SGAPContrastive's forward). world_size must match the actual number
+        # of devices in use for that gather to be correct -- hardcoding 1 here
+        # would silently train each GPU on its own local negatives only.
+        world_size = self.hparams.gpus if self.hparams.gpus and self.hparams.gpus > 0 else 1
+
+        loss_name = getattr(self.hparams, "loss", "nt_xent")
+        if loss_name == "nt_xent":
+            criterion = NT_Xent(batch_size, self.hparams.temperature, world_size=world_size)
+        elif loss_name == "sgap":
+            criterion = SGAPContrastive(batch_size, self.hparams.temperature, world_size=world_size)
+        else:
+            raise NotImplementedError(f"Unknown loss: {loss_name}")
         return criterion
 
     def configure_optimizers(self) -> dict:
